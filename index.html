@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地鐵跑酷 V7.1 - 霸王龍冷卻平衡版</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: #121212;
+            font-family: 'Segoe UI', monospace;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            color: #eee;
+            user-select: none;
+        }
+        .game-container {
+            position: relative;
+            box-shadow: 0 0 30px rgba(255, 211, 42, 0.4);
+            border-radius: 8px;
+            overflow: hidden;
+            background-color: #f7f7f7;
+        }
+        canvas { display: block; cursor: pointer; }
+        .instructions {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #aaa;
+            text-align: center;
+            line-height: 1.6;
+        }
+        .key {
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #fff;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="game-container">
+        <canvas id="gameCanvas" width="800" height="300"></canvas>
+    </div>
+
+    <div class="instructions">
+        <span class="key">空白鍵/W</span> 跳躍 | 
+        <span class="key">S/下鍵</span> 蹲下 / 快速下壓 | 
+        <span class="key">F 鍵</span> 發動大招（黃金龍：無敵5秒，冷卻30秒）<br>
+        <span style="color:#ffd32a; font-weight:bold;">🪙 收集金色豆豆</span> | 
+        <span style="color:#00a8ff; font-weight:bold;">🚀 噴射背包</span> | 
+        <span style="color:#e1b12c; font-weight:bold;">👟 超級鞋</span> | 
+        <span style="color:#ffdd59; font-weight:bold;">✨ 無敵金身</span>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+
+        // 圖片資源預載系統（相對路徑適配 GitHub Pages）
+        const assets = {
+            player: new Image(),
+            chaser: new Image()
+        };
+        let assetsLoaded = {
+            player: false,
+            chaser: false
+        };
+
+        assets.player.onload = () => { assetsLoaded.player = true; };
+        assets.player.onerror = () => {
+            if (!assets.player.src.endsWith('.png.png')) {
+                assets.player.src = './assets/images/player.png.png';
+            }
+        };
+        assets.player.src = './assets/images/player.png';
+
+        assets.chaser.onload = () => { assetsLoaded.chaser = true; };
+        assets.chaser.onerror = () => {
+            if (!assets.chaser.src.endsWith('.png.png')) {
+                assets.chaser.src = './assets/images/chaser.png.png';
+            }
+        };
+        assets.chaser.src = './assets/images/chaser.png';
+
+        // 遊戲狀態：CHAR_SELECT -> START -> PLAYING -> GAMEOVER
+        const urlParams = new URLSearchParams(window.location.search);
+        let gameState = urlParams.get('state') || 'CHAR_SELECT';
+        let selectedCharacter = parseInt(urlParams.get('char') || '0', 10); // 0: 綠色恐龍, 1: 黃金恐龍
+        let score = 0;
+        let highScore = localStorage.getItem('dino_v7_high_score') || 0;
+        let gameSpeed = 6;
+        let frameCount = 0;
+
+        // 音效系統
+        let audioCtx = null;
+
+        // 1. 背景音樂與跳躍音效實例預載（相對路徑適配 GitHub Pages）
+        const bgm = new Audio();
+        bgm.loop = true;
+        bgm.volume = 0.3; // 背景音樂音量設定為 0.3
+        bgm.preload = 'auto';
+        bgm.onerror = () => {
+            if (!bgm.src.endsWith('.mp3.mp3')) {
+                bgm.src = './assets/audio/bgm.mp3.mp3';
+            }
+        };
+        bgm.src = './assets/audio/bgm.mp3';
+
+        const jumpSound = new Audio();
+        jumpSound.preload = 'auto';
+        jumpSound.volume = 0.6;
+        jumpSound.onerror = () => {
+            if (!jumpSound.src.endsWith('.wav.mp3')) {
+                jumpSound.src = './assets/audio/jump.wav.mp3';
+            }
+        };
+        jumpSound.src = './assets/audio/jump.wav';
+
+        let bgmPlaying = false;
+        function startBgm() {
+            if (!bgmPlaying) {
+                const playPromise = bgm.play();
+                if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                        bgmPlaying = true;
+                    }).catch(() => {
+                        bgmPlaying = false;
+                    });
+                }
+            }
+        }
+
+        function playJumpSound() {
+            try {
+                jumpSound.currentTime = 0;
+                const p = jumpSound.play();
+                if (p !== undefined) {
+                    p.catch(() => {});
+                }
+            } catch (e) {}
+        }
+
+        // 解鎖瀏覽器 Auto-play 限制並播放音訊
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume().catch(() => {});
+            }
+            startBgm();
+        }
+
+        // 監聽全域點擊或按鍵，第一次操作即解鎖音效播放
+        window.addEventListener('pointerdown', initAudio, { passive: true });
+
+        function playTone(freq, duration, type = 'square', delay = 0) {
+            if (!audioCtx) return;
+            setTimeout(() => {
+                try {
+                    const osc = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    osc.type = type;
+                    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+                    gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + duration);
+                } catch (e) {}
+            }, delay);
+        }
+
+        function playCoinSound() {
+            playTone(987.77, 0.05, 'sine', 0);
+            playTone(1318.51, 0.08, 'sine', 40);
+        }
+
+        function playPowerupSound() {
+            playTone(440, 0.08, 'triangle', 0);
+            playTone(554.37, 0.08, 'triangle', 60);
+            playTone(659.25, 0.08, 'triangle', 120);
+            playTone(880, 0.2, 'triangle', 180);
+        }
+
+        function playUltimateSound() {
+            playTone(523.25, 0.1, 'sine', 0);
+            playTone(659.25, 0.1, 'sine', 80);
+            playTone(783.99, 0.1, 'sine', 160);
+            playTone(1046.50, 0.3, 'sine', 240);
+        }
+
+        function playHurtSound() {
+            playTone(150, 0.15, 'sawtooth', 0);
+        }
+
+        // 震動效果
+        let shakeTime = 0, shakeIntensity = 0;
+        function triggerShake(intensity, duration) {
+            shakeIntensity = intensity; shakeTime = duration;
+        }
+
+        const GROUND_Y = 240;
+        const GRAVITY = 0.65;
+
+        // 粒子系統
+        let particles = [];
+        class Particle {
+            constructor(x, y, color, vx, vy) {
+                this.x = x; this.y = y;
+                this.size = Math.random() * 5 + 2;
+                this.vx = vx !== undefined ? vx : (Math.random() - 0.5) * 8;
+                this.vy = vy !== undefined ? vy : (Math.random() - 0.8) * 6;
+                this.color = color || '#535353';
+                this.alpha = 1;
+                this.life = Math.random() * 20 + 20;
+            }
+            update() {
+                this.x += this.vx; this.y += this.vy; this.vy += 0.15;
+                this.alpha -= 1 / this.life;
+            }
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, this.alpha);
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+                ctx.restore();
+            }
+        }
+
+        function createParticles(x, y, count = 15, color) {
+            for (let i = 0; i < count; i++) particles.push(new Particle(x, y, color));
+        }
+
+        // 角色屬性定義
+        const CHARACTERS = [
+            {
+                name: "經典綠龍",
+                color: "#333",
+                desc: "平衡型，可撿取噴射背包與超級鞋",
+                hasUlt: false
+            },
+            {
+                name: "黃金霸王龍",
+                color: "#ffb142",
+                desc: "技能【無敵金身】：無敵 5 秒（冷卻 30 秒）",
+                hasUlt: true
+            }
+        ];
+
+        // 恐龍主角
+        const dino = {
+            x: 130,
+            y: GROUND_Y - 44,
+            width: 40, height: 44, vy: 0,
+            isJumping: false, isDucking: false,
+            legFrame: 0,
+            stumbleTimer: 0,
+            jetpackTimer: 0,
+            shoesTimer: 0,
+            ultTimer: 0,
+            ultCooldown: 0, // 冷卻時間計時器 (frame)
+
+            reset() {
+                this.x = 130; this.y = GROUND_Y - 44;
+                this.width = 40; this.height = 44; this.vy = 0;
+                this.isJumping = false; this.isDucking = false;
+                this.legFrame = 0;
+                this.stumbleTimer = 0;
+                this.jetpackTimer = 0;
+                this.shoesTimer = 0;
+                this.ultTimer = 0;
+                this.ultCooldown = 0;
+            },
+            useUltimate() {
+                if (selectedCharacter === 1 && this.ultTimer <= 0 && this.ultCooldown <= 0) {
+                    this.ultTimer = 300; // 5 秒 (60 FPS * 5)
+                    this.ultCooldown = 1800; // 30 秒 (60 FPS * 30)
+                    playUltimateSound();
+                    createParticles(this.x + 20, this.y + 20, 30, '#ffd32a');
+                }
+            },
+            jump() {
+                if (this.jetpackTimer > 0) return;
+                if (!this.isJumping) {
+                    const jumpPower = this.shoesTimer > 0 ? -17.5 : -12.5;
+                    this.vy = jumpPower; this.isJumping = true;
+                    if (this.isDucking) this.duck(false);
+                    // 播放專屬跳躍音效 jump.wav
+                    playJumpSound();
+                    createParticles(this.x + 20, GROUND_Y, 6, this.shoesTimer > 0 ? '#e1b12c' : '#aaa');
+                }
+            },
+            fastDrop() {
+                if (this.isJumping && this.jetpackTimer <= 0) {
+                    this.vy += 14;
+                }
+            },
+            duck(shouldDuck) {
+                if (this.jetpackTimer > 0) return;
+                if (this.isJumping) { this.fastDrop(); return; }
+                if (shouldDuck && !this.isDucking) {
+                    this.isDucking = true; this.height = 22; this.y = GROUND_Y - 22;
+                } else if (!shouldDuck && this.isDucking) {
+                    this.isDucking = false; this.height = 44; this.y = GROUND_Y - 44;
+                }
+            },
+            update() {
+                // 冷卻倒數
+                if (this.ultCooldown > 0) {
+                    this.ultCooldown--;
+                }
+
+                // 大招時間倒數
+                if (this.ultTimer > 0) {
+                    this.ultTimer--;
+                    if (frameCount % 3 === 0) {
+                        particles.push(new Particle(this.x + Math.random() * 40, this.y + Math.random() * 40, '#ffd32a'));
+                    }
+                }
+
+                if (this.jetpackTimer > 0) {
+                    this.jetpackTimer--;
+                    const targetY = GROUND_Y - 150;
+                    this.y += (targetY - this.y) * 0.1;
+                    this.isJumping = false;
+                    this.vy = 0;
+
+                    if (frameCount % 2 === 0) {
+                        particles.push(new Particle(this.x, this.y + 20, '#00a8ff', -4 - Math.random() * 4, (Math.random() - 0.5) * 4));
+                        particles.push(new Particle(this.x, this.y + 20, '#ffd32a', -3 - Math.random() * 3, (Math.random() - 0.5) * 4));
+                    }
+
+                    if (this.jetpackTimer === 0) {
+                        this.isJumping = true;
+                    }
+                } else {
+                    if (this.shoesTimer > 0) this.shoesTimer--;
+
+                    if (this.isJumping) {
+                        this.vy += GRAVITY; 
+                        this.y += this.vy;
+                        const currH = this.isDucking ? 22 : 44;
+                        if (this.y >= GROUND_Y - currH) {
+                            this.y = GROUND_Y - currH; 
+                            this.vy = 0; 
+                            this.isJumping = false;
+                            triggerShake(2, 4);
+                        }
+                    }
+                }
+
+                if (frameCount % 5 === 0) this.legFrame = (this.legFrame + 1) % 2;
+                if (this.stumbleTimer > 0) this.stumbleTimer--;
+            },
+            draw() {
+                ctx.save();
+                
+                // 狀態效果：無敵金身 / 受擊閃爍 / 角色外觀
+                const isInvincible = this.ultTimer > 0;
+                const isHurt = this.stumbleTimer > 0;
+                
+                if (isInvincible) {
+                    ctx.shadowColor = '#ffd32a';
+                    ctx.shadowBlur = 18;
+                }
+
+                if (isHurt && frameCount % 6 < 3) {
+                    ctx.globalAlpha = 0.5;
+                }
+
+                if (assetsLoaded.player && assets.player.complete && assets.player.naturalWidth > 0) {
+                    // 主角精靈圖：90x58 (2 幀，每幀 45x58)
+                    const frameIndex = this.isJumping ? 0 : this.legFrame;
+                    const srcW = 45;
+                    const srcH = 58;
+                    const sx = frameIndex * srcW;
+                    const sy = 0;
+
+                    let drawW = 45;
+                    let drawH = 58;
+                    const drawBottom = this.y + this.height;
+
+                    if (this.isDucking) {
+                        // 蹲下時壓低姿態滑行
+                        drawH = 34;
+                        drawW = 48;
+                    }
+
+                    const drawX = this.x + (this.width - drawW) / 2;
+                    const drawY = drawBottom - drawH;
+
+                    // 角色外觀濾鏡（黃金龍/無敵/受傷）
+                    if (isHurt) {
+                        ctx.filter = 'sepia(1) saturate(5) hue-rotate(320deg)';
+                    } else if (isInvincible) {
+                        ctx.filter = (frameCount % 4 < 2) ? 'brightness(1.8)' : 'brightness(1.2) sepia(0.6) saturate(3)';
+                    } else if (selectedCharacter === 1) {
+                        ctx.filter = 'brightness(1.15) sepia(0.85) saturate(3) hue-rotate(5deg)';
+                    }
+
+                    // 原圖面朝左，以水平鏡像翻轉使其朝右奔跑
+                    ctx.save();
+                    ctx.translate(drawX + drawW / 2, drawY + drawH / 2);
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(
+                        assets.player,
+                        sx, sy, srcW, srcH,
+                        -drawW / 2, -drawH / 2, drawW, drawH
+                    );
+                    ctx.restore();
+                    ctx.filter = 'none';
+                } else {
+                    // 降級色塊繪製
+                    if (isInvincible) {
+                        ctx.fillStyle = (frameCount % 4 < 2) ? '#ffffff' : CHARACTERS[selectedCharacter].color;
+                    } else {
+                        ctx.fillStyle = isHurt ? '#ff4757' : CHARACTERS[selectedCharacter].color;
+                    }
+
+                    if (this.isDucking) {
+                        ctx.fillRect(this.x, this.y, 45, this.height);
+                        ctx.fillRect(this.x + 30, this.y + 2, 20, 8);
+                    } else {
+                        ctx.fillRect(this.x + 10, this.y + 15, 20, 20);
+                        ctx.fillRect(this.x + 18, this.y, 22, 18);
+                        ctx.fillStyle = '#fff'; ctx.fillRect(this.x + 32, this.y + 3, 4, 4);
+                        ctx.fillStyle = isInvincible ? '#ffd32a' : (isHurt ? '#ff4757' : CHARACTERS[selectedCharacter].color);
+                        if (this.legFrame === 0 || this.isJumping) {
+                            ctx.fillRect(this.x + 12, this.y + 35, 6, 9);
+                        } else {
+                            ctx.fillRect(this.x + 24, this.y + 35, 6, 9);
+                        }
+                    }
+                }
+
+                // 噴射背包視覺
+                if (this.jetpackTimer > 0) {
+                    ctx.fillStyle = '#00a8ff'; ctx.fillRect(this.x - 8, this.y + 10, 10, 22);
+                    ctx.fillStyle = '#ffd32a'; ctx.fillRect(this.x - 6, this.y + 28, 6, 8);
+                }
+
+                // 超級鞋視覺
+                if (this.shoesTimer > 0 && this.jetpackTimer <= 0) {
+                    ctx.fillStyle = '#e1b12c';
+                    ctx.fillRect(this.x + 8, this.y + this.height - 3, 11, 5);
+                    ctx.fillRect(this.x + 23, this.y + this.height - 3, 11, 5);
+                }
+
+                ctx.restore();
+            }
+        };
+
+        // 追捕者
+        const chaser = {
+            x: 20,
+            y: GROUND_Y - 54,
+            width: 48,
+            height: 54,
+            animFrame: 0,
+            targetX: 20,
+            reset() {
+                this.x = -20;
+                this.targetX = 20;
+                this.animFrame = 0;
+            },
+            update() {
+                this.x += (this.targetX - this.x) * 0.05;
+                // 追捕者奔跑 8 幀動畫
+                if (frameCount % 4 === 0) {
+                    this.animFrame = (this.animFrame + 1) % 8;
+                }
+            },
+            draw() {
+                ctx.save();
+                if (assetsLoaded.chaser && assets.chaser.complete && assets.chaser.naturalWidth > 0) {
+                    // chaser.png 規格：17 列 x 7 行，每幀 160 x 128
+                    // Row 1 (y=128) 為奔跑動作（共 8 幀）
+                    // 抓到主角 (GAMEOVER) 時切換為 Row 2 (攻擊動作，12 幀) 或 Row 0
+                    const isGameOver = (gameState === 'GAMEOVER');
+                    const row = isGameOver ? 2 : 1;
+                    const maxFrames = isGameOver ? 12 : 8;
+                    const col = this.animFrame % maxFrames;
+
+                    const srcW = 160;
+                    const srcH = 128;
+                    const sx = col * srcW;
+                    const sy = row * srcH;
+
+                    // 追捕者角色中心 X 約 84，腳底 Y 約 115
+                    const centerX = this.x + this.width / 2;
+                    const bottomY = this.y + this.height;
+
+                    // 原圖面朝左，水平鏡像翻轉使其朝右追捕
+                    ctx.translate(centerX, bottomY);
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(
+                        assets.chaser,
+                        sx, sy, srcW, srcH,
+                        -84, -115, srcW, srcH
+                    );
+                } else {
+                    // 降級色塊繪製
+                    ctx.fillStyle = '#2f3542';
+                    ctx.fillRect(this.x + 5, this.y + 10, 30, 30);
+                    ctx.fillRect(this.x + 20, this.y, 24, 20);
+                    ctx.fillStyle = '#ff4757'; ctx.fillRect(this.x + 36, this.y + 4, 6, 4);
+                    ctx.fillStyle = '#2f3542'; ctx.fillRect(this.x + 30, this.y + 20, 18, 8);
+                    if (this.animFrame % 2 === 0) ctx.fillRect(this.x + 8, this.y + 40, 10, 14);
+                    else ctx.fillRect(this.x + 22, this.y + 40, 10, 14);
+                }
+                ctx.restore();
+            }
+        };
+
+        // 金幣
+        class Coin {
+            constructor(x, y) {
+                this.x = x; this.y = y;
+                this.radius = 8;
+                this.hit = false;
+            }
+            update() { this.x -= gameSpeed; }
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffd32a';
+                ctx.fill();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#ffa801';
+                ctx.stroke();
+            }
+        }
+
+        // 道具
+        class PowerUp {
+            constructor() {
+                this.type = Math.random() < 0.5 ? 'JETPACK' : 'SHOES';
+                this.width = 24; this.height = 24;
+                this.x = canvas.width + 50;
+                this.y = GROUND_Y - 70;
+                this.hit = false;
+            }
+            update() { this.x -= gameSpeed; }
+            draw() {
+                if (this.type === 'JETPACK') {
+                    ctx.fillStyle = '#00a8ff'; ctx.fillRect(this.x, this.y, 20, 24);
+                    ctx.fillStyle = '#ffd32a'; ctx.fillRect(this.x + 4, this.y + 4, 12, 16);
+                } else {
+                    ctx.fillStyle = '#e1b12c'; ctx.fillRect(this.x, this.y + 10, 24, 12);
+                    ctx.fillStyle = '#1e90ff'; ctx.fillRect(this.x + 4, this.y, 16, 10);
+                }
+            }
+        }
+
+        // 障礙物
+        class Cactus {
+            constructor() {
+                this.width = Math.random() > 0.5 ? 24 : 38;
+                this.height = 40 + Math.random() * 10;
+                this.x = canvas.width + 50;
+                this.y = GROUND_Y - this.height;
+                this.hit = false;
+            }
+            update() { this.x -= gameSpeed; }
+            draw() {
+                ctx.fillStyle = '#2ed573';
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+            }
+        }
+
+        class HighBar {
+            constructor() {
+                this.width = 65; this.height = 120;
+                this.x = canvas.width + 50;
+                this.y = GROUND_Y - 144;
+                this.hit = false;
+            }
+            update() { this.x -= gameSpeed; }
+            draw() {
+                ctx.fillStyle = '#57606f';
+                ctx.fillRect(this.x, this.y, 8, 144);
+                ctx.fillRect(this.x + this.width - 8, this.y, 8, 144);
+                ctx.fillStyle = '#ffa502';
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+                ctx.fillStyle = '#2f3542';
+                for (let i = 0; i < this.width; i += 20) {
+                    ctx.fillRect(this.x + i, this.y, 10, this.height);
+                }
+            }
+        }
+
+        let obstacles = [];
+        let powerups = [];
+        let coins = [];
+
+        let obstacleTimer = 0;
+        let powerupTimer = 0;
+        let coinTimer = 0;
+
+        function spawnCoinPattern() {
+            const startX = canvas.width + 50;
+            const patternType = Math.floor(Math.random() * 3);
+
+            if (patternType === 0) {
+                for (let i = 0; i < 5; i++) coins.push(new Coin(startX + i * 25, GROUND_Y - 15));
+            } else if (patternType === 1) {
+                for (let i = 0; i < 6; i++) {
+                    const yOffset = Math.sin((i / 5) * Math.PI) * 70;
+                    coins.push(new Coin(startX + i * 30, GROUND_Y - 30 - yOffset));
+                }
+            } else if (patternType === 2) {
+                for (let i = 0; i < 8; i++) coins.push(new Coin(startX + i * 25, GROUND_Y - 150));
+            }
+        }
+
+        function handleEntities() {
+            obstacleTimer++;
+            if (obstacleTimer > Math.max(50, 90 - gameSpeed * 2.5)) {
+                if (Math.random() < 0.4) obstacles.push(new HighBar());
+                else obstacles.push(new Cactus());
+                obstacleTimer = 0;
+            }
+
+            coinTimer++;
+            if (coinTimer > 120) {
+                spawnCoinPattern();
+                coinTimer = 0;
+            }
+
+            powerupTimer++;
+            if (powerupTimer > 450) {
+                powerups.push(new PowerUp());
+                powerupTimer = 0;
+            }
+
+            coins.forEach(c => {
+                c.update(); c.draw();
+                if (!c.hit) {
+                    const dx = (dino.x + dino.width / 2) - c.x;
+                    const dy = (dino.y + dino.height / 2) - c.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < c.radius + dino.width / 2) {
+                        c.hit = true;
+                        score += 10;
+                        playCoinSound();
+                        createParticles(c.x, c.y, 6, '#ffd32a');
+                    }
+                }
+            });
+            coins = coins.filter(c => !c.hit && c.x > -20);
+
+            powerups.forEach(p => {
+                p.update(); p.draw();
+                if (!p.hit &&
+                    dino.x < p.x + p.width &&
+                    dino.x + dino.width > p.x &&
+                    dino.y < p.y + p.height &&
+                    dino.y + dino.height > p.y
+                ) {
+                    p.hit = true;
+                    playPowerupSound();
+                    if (p.type === 'JETPACK') {
+                        dino.jetpackTimer = 300;
+                        createParticles(dino.x, dino.y, 25, '#00a8ff');
+                    } else {
+                        dino.shoesTimer = 480;
+                        createParticles(dino.x, dino.y, 25, '#e1b12c');
+                    }
+                }
+            });
+            powerups = powerups.filter(p => !p.hit && p.x + p.width > -50);
+
+            obstacles.forEach(obs => {
+                obs.update(); obs.draw();
+
+                // 無敵狀態或噴射背包期間免疫碰撞
+                if (dino.jetpackTimer > 0 || dino.ultTimer > 0) return;
+
+                if (!obs.hit &&
+                    dino.x < obs.x + obs.width &&
+                    dino.x + dino.width > obs.x &&
+                    dino.y < obs.y + obs.height &&
+                    dino.y + dino.height > obs.y
+                ) {
+                    obs.hit = true;
+                    dino.stumbleTimer = 30;
+                    playHurtSound();
+                    triggerShake(8, 12);
+                    createParticles(dino.x + 20, dino.y + 20, 20, '#ff4757');
+                    chaser.targetX += 35;
+                }
+            });
+            obstacles = obstacles.filter(o => o.x + o.width > -50);
+        }
+
+        // 繪製選角畫面
+        function drawCharSelect() {
+            ctx.fillStyle = '#1e272e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#ffd32a';
+            ctx.font = 'bold 28px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('選擇你的角色', canvas.width / 2, 50);
+
+            CHARACTERS.forEach((char, index) => {
+                const boxX = 180 + index * 240;
+                const boxY = 90;
+                const isSelected = selectedCharacter === index;
+
+                ctx.fillStyle = isSelected ? 'rgba(255, 211, 42, 0.2)' : 'rgba(255, 255, 255, 0.05)';
+                ctx.strokeStyle = isSelected ? '#ffd32a' : '#485460';
+                ctx.lineWidth = isSelected ? 4 : 2;
+                ctx.fillRect(boxX, boxY, 200, 140);
+                ctx.strokeRect(boxX, boxY, 200, 140);
+
+                // 角色預覽圖示
+                if (assetsLoaded.player && assets.player.complete && assets.player.naturalWidth > 0) {
+                    ctx.save();
+                    if (index === 1) {
+                        ctx.filter = 'brightness(1.15) sepia(0.85) saturate(3) hue-rotate(5deg)';
+                    }
+                    ctx.translate(boxX + 100, boxY + 52);
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(assets.player, 0, 0, 45, 58, -22, -29, 45, 58);
+                    ctx.restore();
+                } else {
+                    ctx.fillStyle = char.color;
+                    ctx.fillRect(boxX + 80, boxY + 25, 40, 40);
+                }
+
+                // 角色名稱
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 18px monospace';
+                ctx.fillText(char.name, boxX + 100, boxY + 98);
+
+                // 說明文字
+                ctx.fillStyle = '#aaa';
+                ctx.font = '12px monospace';
+                ctx.fillText(char.desc, boxX + 100, boxY + 120);
+            });
+
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 16px monospace';
+            ctx.fillText('按下【← / →】切換角色，按【空白鍵】確認選擇', canvas.width / 2, 265);
+        }
+
+        // 主遊戲迴圈
+        function gameLoop() {
+            ctx.save();
+
+            if (shakeTime > 0) {
+                ctx.translate((Math.random() - 0.5) * shakeIntensity, (Math.random() - 0.5) * shakeIntensity);
+                shakeTime--;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            frameCount++;
+
+            if (gameState === 'CHAR_SELECT') {
+                drawCharSelect();
+            } else {
+                // 背景與地面
+                ctx.fillStyle = '#f7f7f7'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.strokeStyle = '#333'; ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(0, GROUND_Y); ctx.lineTo(canvas.width, GROUND_Y); ctx.stroke();
+
+                if (gameState === 'PLAYING') {
+                    gameSpeed += 0.0008;
+
+                    if (frameCount % 60 === 0 && chaser.targetX > 15) {
+                        chaser.targetX -= 2.5;
+                    }
+
+                    dino.update();
+                    chaser.update();
+                    handleEntities();
+
+                    particles.forEach((p, i) => {
+                        p.update(); p.draw();
+                        if (p.alpha <= 0) particles.splice(i, 1);
+                    });
+
+                    if (chaser.x + chaser.width >= dino.x + 10) {
+                        gameState = 'GAMEOVER';
+                        playTone(100, 0.4, 'sawtooth');
+                        triggerShake(15, 25);
+                        createParticles(dino.x + 10, dino.y + 10, 50, '#ff4757');
+                        if (score > highScore) {
+                            highScore = score;
+                            localStorage.setItem('dino_v7_high_score', highScore);
+                        }
+                    }
+                } else if (gameState === 'GAMEOVER') {
+                    obstacles.forEach(o => o.draw());
+                    coins.forEach(c => c.draw());
+                    particles.forEach(p => { p.update(); p.draw(); });
+                }
+
+                chaser.draw();
+                dino.draw();
+
+                // UI 繪製
+                ctx.fillStyle = '#ffd32a'; ctx.beginPath();
+                ctx.arc(canvas.width - 150, 25, 7, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = '#333'; ctx.font = 'bold 16px monospace'; ctx.textAlign = 'right';
+                ctx.fillText(`🪙 ${score}  HI ${highScore}`, canvas.width - 20, 30);
+
+                if (dino.ultTimer > 0) {
+                    ctx.fillStyle = '#ffd32a'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+                    ctx.fillText(`✨ 無敵金身: ${(dino.ultTimer/60).toFixed(1)}s`, 20, 30);
+                } else if (dino.jetpackTimer > 0) {
+                    ctx.fillStyle = '#00a8ff'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+                    ctx.fillText(`🚀 噴射背包: ${(dino.jetpackTimer/60).toFixed(1)}s`, 20, 30);
+                } else if (dino.shoesTimer > 0) {
+                    ctx.fillStyle = '#e1b12c'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+                    ctx.fillText(`👟 超級鞋: ${(dino.shoesTimer/60).toFixed(1)}s`, 20, 30);
+                } else if (CHARACTERS[selectedCharacter].hasUlt) {
+                    if (dino.ultCooldown > 0) {
+                        ctx.fillStyle = '#888'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+                        ctx.fillText(`⏳ 大招冷卻中: ${(dino.ultCooldown/60).toFixed(1)}s`, 20, 30);
+                    } else {
+                        ctx.fillStyle = '#ffb142'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+                        ctx.fillText(`[F 鍵] 可發動無敵大招`, 20, 30);
+                    }
+                }
+
+                if (gameState === 'START') {
+                    ctx.textAlign = 'center'; ctx.fillStyle = '#333'; ctx.font = 'bold 20px monospace';
+                    ctx.fillText('按【空白鍵】開始遊戲！', canvas.width / 2, canvas.height / 2);
+                } else if (gameState === 'GAMEOVER') {
+                    ctx.textAlign = 'center'; ctx.fillStyle = '#ff4757'; ctx.font = 'bold 30px monospace';
+                    ctx.fillText('你 被 抓 到 了 ！', canvas.width / 2, canvas.height / 2 - 10);
+                    ctx.fillStyle = '#333'; ctx.font = '16px monospace';
+                    ctx.fillText('按【空白鍵】重新選角 / 再玩一次', canvas.width / 2, canvas.height / 2 + 30);
+                }
+            }
+
+            ctx.restore();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // 控制事件
+        window.addEventListener('keydown', (e) => {
+            initAudio();
+
+            if (gameState === 'CHAR_SELECT') {
+                if (e.code === 'ArrowLeft' || e.code === 'KeyA') selectedCharacter = 0;
+                if (e.code === 'ArrowRight' || e.code === 'KeyD') selectedCharacter = 1;
+                if (e.code === 'Space' || e.code === 'Enter') gameState = 'START';
+                return;
+            }
+
+            if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') {
+                e.preventDefault();
+                if (gameState === 'PLAYING') {
+                    dino.jump();
+                } else if (gameState === 'START') {
+                    score = 0; gameSpeed = 6; obstacles = []; powerups = []; coins = []; gameState = 'PLAYING'; dino.reset(); chaser.reset();
+                } else if (gameState === 'GAMEOVER') {
+                    gameState = 'CHAR_SELECT';
+                }
+            }
+
+            if (e.code === 'KeyS' || e.code === 'ArrowDown') {
+                e.preventDefault();
+                if (gameState === 'PLAYING') dino.duck(true);
+            }
+
+            if (e.code === 'KeyF') {
+                if (gameState === 'PLAYING') dino.useUltimate();
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (e.code === 'KeyS' || e.code === 'ArrowDown') {
+                if (gameState === 'PLAYING') dino.duck(false);
+            }
+        });
+
+        canvas.addEventListener('click', () => {
+            initAudio();
+            if (gameState === 'CHAR_SELECT') gameState = 'START';
+            else if (gameState === 'PLAYING') dino.jump();
+            else if (gameState === 'START') { score = 0; gameSpeed = 6; obstacles = []; powerups = []; coins = []; gameState = 'PLAYING'; dino.reset(); chaser.reset(); }
+            else if (gameState === 'GAMEOVER') gameState = 'CHAR_SELECT';
+        });
+
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
